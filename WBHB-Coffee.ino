@@ -3,6 +3,8 @@
 #include <PID_v1.h>
 #include <EEPROM.h>
 
+// Constants
+
 #define OFF 0x0
 #define RED 0x1
 #define YELLOW 0x3
@@ -12,7 +14,15 @@
 #define VIOLET 0x5
 #define WHITE 0x7 
 
+enum STATE {
+  INIT,   // 
+  SETUP,  // change parameters
+  HEAT,   // run boiler at brew temperature
+  BREW,   // pull a shot
+  STEAM   // run boiler at steam temperature
+};
 
+// Params
 
 const uint8_t PARAMS_VERSION = 1;
 #define PARAMS_VER_ADD 0x00
@@ -28,8 +38,6 @@ const uint8_t PARAMS_VERSION = 1;
 #define BANG_HIGH 8
 #define PID_LOW_ADJUST 9
 
-// Params
-
 double params[10] = {
   0, // NOT USED
   15, // params[KP] = 15;
@@ -43,13 +51,6 @@ double params[10] = {
   75, // params[BANG_LOW] = 75;
   105, // params[BANG_HIGH] = 105;
   -50 // params[PID_LOW_ADJUST] = -50;
-};
-
-enum STATE {
-  INIT,   // 
-  SETUP,  // change parameters
-  HEAT,   // run boiler at brew temperature
-  STEAM   // run boiler at steam temperature
 };
 
 // Vars
@@ -139,48 +140,48 @@ bool pidWindow() {
 }
 
 void setup() {
-    state = INIT;
+  state = INIT;
 
-    pinMode(SSR_PIN, OUTPUT);
+  pinMode(SSR_PIN, OUTPUT);
 
-    Serial.begin(9600, SERIAL_8N1);
+  Serial.begin(9600, SERIAL_8N1);
 
-    lcd.begin(16, 2);
-    lcd.print("WBHB Coffee");
-    lcd.setCursor(0, 1);
-    lcd.print("Init v");
+  lcd.begin(16, 2);
+  lcd.print("WBHB Coffee");
+  lcd.setCursor(0, 1);
+  lcd.print("Init v");
 
-    uint8_t version = 0;
+  uint8_t version = 0;
 
-    EEPROM.get(PARAMS_VER_ADD, version);
+  EEPROM.get(PARAMS_VER_ADD, version);
 
-    if (version == PARAMS_VERSION) {
-      lcd.print(PARAMS_VERSION);
-      // load stored params from EEPROM
-      EEPROM.get(PARAMS_BASE_ADD, params);
-    } else {
-      // print update
-      lcd.print(version);
-      lcd.print("->");
-      lcd.print(PARAMS_VERSION);
-      // store version to EEPROM
-      EEPROM.put(PARAMS_VER_ADD, PARAMS_VERSION);
-      // store default params to EEPROM
-      EEPROM.put(PARAMS_BASE_ADD, params);
-    }
+  if (version == PARAMS_VERSION) {
+    lcd.print(PARAMS_VERSION);
+    // load stored params from EEPROM
+    EEPROM.get(PARAMS_BASE_ADD, params);
+  } else {
+    // print update
+    lcd.print(version);
+    lcd.print("->");
+    lcd.print(PARAMS_VERSION);
+    // store version to EEPROM
+    EEPROM.put(PARAMS_VER_ADD, PARAMS_VERSION);
+    // store default params to EEPROM
+    EEPROM.put(PARAMS_BASE_ADD, params);
+  }
 
-    delay(500);
+  delay(500);
+  
+  state = HEAT;
 
-    state = HEAT;
+  updateSetPoint(params[SET_BREW]);
 
-    updateSetPoint(params[SET_BREW]);
+  pidWindowStartTime = millis();
+  tempControl.SetOutputLimits(params[PID_LOW_ADJUST], pidWindowSize);
+  tempControl.SetMode(AUTOMATIC);
 
-    pidWindowStartTime = millis();
-    tempControl.SetOutputLimits(params[PID_LOW_ADJUST], pidWindowSize);
-    tempControl.SetMode(AUTOMATIC);
-
-    lastSerialUpdate = millis();
-    lastScreenUpdate = millis();
+  lastSerialUpdate = millis();
+  lastScreenUpdate = millis();
 
 }
 

@@ -22,9 +22,14 @@ enum STATE {
   STEAM   // run boiler at steam temperature
 };
 
+enum SET {
+  AT_BOILER,
+  AT_GROUP
+};
+
 // Params
 
-const uint8_t PARAMS_VERSION = 1;
+const uint8_t PARAMS_VERSION = 2;
 #define PARAMS_VER_ADD 0x00
 #define PARAMS_BASE_ADD 0x04
 
@@ -36,9 +41,10 @@ const uint8_t PARAMS_VERSION = 1;
 #define OFFSET 6
 #define BANG_LOW 7
 #define BANG_HIGH 8
-#define PID_LOW_ADJUST 9
+#define MAX_TEMP 9
+#define PID_LOW_ADJUST 10
 
-double params[10] = {
+double params[11] = {
   0, // NOT USED
   15, // params[KP] = 15;
   0.5, // params[KI] = 0.5;
@@ -48,13 +54,14 @@ double params[10] = {
   6, // offset = 6;
 
   // Advanced Params
-  75, // params[BANG_LOW] = 75;
-  105, // params[BANG_HIGH] = 105;
+  20, // params[BANG_LOW] force output when more than this far below setpoint;
+  10, // params[BANG_HIGH] force output off when more that this far above setpoint;
+  130, // params[BANG_HIGH] maximum boiler temperature
   -50 // params[PID_LOW_ADJUST] = -50;
 };
 
 // Vars
-STATE state = INIT;
+STATE state = STATE::INIT;
 
 double boilerTemp = 0;
 double groupTemp = boilerTemp - params[OFFSET];
@@ -92,8 +99,16 @@ PID tempControl(&boilerTemp, &pidOut, &boilerSetPoint, params[KP], params[KI], p
 
 // Convenience functions
 
-void updateSetPoint(double atGroup) {
-  boilerSetPoint = atGroup + params[OFFSET];
+double updateParam(uint8_t address, double delta) {
+  params[address] += delta;
+  EEPROM.put(PARAMS_BASE_ADD + address * sizeof(double), params[address]);
+}
+
+void updateSetPoint(double setPoint, SET setAt) {
+  if (setAt == SET::AT_GROUP) {
+    setPoint += params[OFFSET];
+  }
+  boilerSetPoint = setPoint;
 }
 
 void updateTemp() {
@@ -106,21 +121,31 @@ void updateTemp() {
   boilerTemp = (tempSmooth[0] + tempSmooth[1] + tempSmooth[2] + tempSmooth[3]) / 4;
   groupTemp = boilerTemp - params[OFFSET];
 
-  if (tempControl.GetMode() == AUTOMATIC) {
-    if (groupTemp > params[BANG_HIGH]) {
-      tempControl.SetMode(MANUAL);
-      pidOut = params[PID_LOW_ADJUST];
-    }
-    if (groupTemp < params[BANG_LOW]) {
-      tempControl.SetMode(MANUAL);
-      pidOut = pidWindowSize;
-    }
-  }
+  // force boiler off if too hot
+  if (boilerTemp > params[MAX_TEMP]) {
+    tempControl.SetMode(MANUAL);
+    pidOut = params[PID_LOW_ADJUST];
+  } else {
 
-  if (tempControl.GetMode() == MANUAL) {
-    if (groupTemp < params[BANG_HIGH] && groupTemp > params[BANG_LOW]) {
-      pidOut = 0;
-      tempControl.SetMode(AUTOMATIC);
+    // handle switching from pid to bang
+    if (tempControl.GetMode() == AUTOMATIC) {
+      if (boilerTemp > boilerSetPoint + params[BANG_HIGH]) {
+        tempControl.SetMode(MANUAL);
+        pidOut = params[PID_LOW_ADJUST];
+      }
+      if (boilerTemp < boilerSetPoint - params[BANG_LOW]) {
+        tempControl.SetMode(MANUAL);
+        pidOut = pidWindowSize;
+      }
+    }
+
+    // hadle switched from bang to pid
+    if (tempControl.GetMode() == MANUAL) {
+      if (boilerTemp < boilerSetPoint + params[BANG_HIGH]
+      && boilerTemp > boilerSetPoint - params[BANG_LOW]) {
+        pidOut = 0;
+        tempControl.SetMode(AUTOMATIC);
+      }
     }
   }
 }
@@ -140,7 +165,7 @@ bool pidWindow() {
 }
 
 void setup() {
-  state = INIT;
+  state = STATE::INIT;
 
   pinMode(SSR_PIN, OUTPUT);
 
@@ -172,9 +197,9 @@ void setup() {
 
   delay(500);
   
-  state = HEAT;
+  state = STATE::HEAT;
 
-  updateSetPoint(params[SET_BREW]);
+  updateSetPoint(params[SET_BREW], SET::AT_GROUP);
 
   pidWindowStartTime = millis();
   tempControl.SetOutputLimits(params[PID_LOW_ADJUST], pidWindowSize);
@@ -207,44 +232,40 @@ void loop() {
       switch (state) {
         case HEAT:
           if (buttons & BUTTON_SELECT) {
-            // state = BREW;
+            // state = STATE::BREW;
           }
           if (buttons & BUTTON_UP) {
-            params[SET_BREW]++;
-            updateSetPoint(params[SET_BREW]);
-            EEPROM.put(PARAMS_BASE_ADD + SET_BREW * sizeof(double), params[SET_BREW]);
+            updateParam(SET_BREW, 1);
+            updateSetPoint(params[SET_BREW], SET::AT_GROUP);
             break;
           }
           if (buttons & BUTTON_DOWN) {
-            params[SET_BREW]--;
-            updateSetPoint(params[SET_BREW]);
-            EEPROM.put(PARAMS_BASE_ADD + SET_BREW * sizeof(double), params[SET_BREW]);
+            updateParam(SET_BREW, -1);
+            updateSetPoint(params[SET_BREW], SET::AT_GROUP);
             break;
           }
           if (buttons & BUTTON_LEFT) {
-            state = SETUP;
+            state = STATE::SETUP;
           }
           if (buttons & BUTTON_RIGHT) {
-            state = STEAM;
-            updateSetPoint(params[SET_STEAM]);
+            state = STATE::STEAM;
+            updateSetPoint(params[SET_STEAM], SET::AT_BOILER);
           }
           break;
         case STEAM:
           if (buttons & BUTTON_UP) {
-            params[SET_STEAM]++;
-            updateSetPoint(params[SET_STEAM]);
-            EEPROM.put(PARAMS_BASE_ADD + SET_STEAM * sizeof(double), params[SET_STEAM]);
+            updateParam(SET_STEAM, 1);
+            updateSetPoint(params[SET_STEAM], SET::AT_BOILER);
             break;
           }
           if (buttons & BUTTON_DOWN) {
-            params[SET_STEAM]--;
-            updateSetPoint(params[SET_STEAM]);
-            EEPROM.put(PARAMS_BASE_ADD + SET_STEAM * sizeof(double), params[SET_STEAM]);
+            updateParam(SET_STEAM, -1);
+            updateSetPoint(params[SET_STEAM], SET::AT_BOILER);
             break;
           }
           if (buttons & BUTTON_LEFT) {
-            state = HEAT;
-            updateSetPoint(params[SET_BREW]);
+            state = STATE::HEAT;
+            updateSetPoint(params[SET_BREW], SET::AT_GROUP);
           }
           break;
         case SETUP:
@@ -264,44 +285,38 @@ void loop() {
           if (buttons & BUTTON_UP) {
             switch (editSetting) {
               case KP:
-                params[KP] += 1;
+                updateParam(KP, 1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KP * sizeof(double), params[KP]);
                 break;
               case KI:
-                params[KI] += 0.1;
+                updateParam(KI, 0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KI * sizeof(double), params[KI]);
                 break;
               case KD:
-                params[KD] += 0.1;
+                updateParam(KD, 0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KD * sizeof(double), params[KD]);
                 break;
             }
           }
           if (buttons & BUTTON_DOWN) {
             switch (editSetting) {
               case KP:
-                params[KP] -= 1;
+                updateParam(KP, -1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KP * sizeof(double), params[KP]);
                 break;
               case KI:
-                params[KI] -= 0.1;
+                updateParam(KI, -0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KI * sizeof(double), params[KI]);
                 break;
               case KD:
-                params[KD] -= 0.1;
+                updateParam(KD, -0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
-                EEPROM.put(PARAMS_BASE_ADD + KD * sizeof(double), params[KD]);
                 break;
             }
           }
           break;
           if (buttons & BUTTON_RIGHT) {
-            state = HEAT;
+            state = STATE::HEAT;
           }
       }
     }
@@ -327,28 +342,38 @@ void loop() {
     lastScreenUpdate = now;
     lcd.clear();
 
-    lcd.setCursor(0, 0);
-
-    lcd.print("Set: ");
-    if (state == HEAT) {
-      lcd.print(params[SET_BREW]);
+    
+    if (state == STATE::HEAT) {
       lcd.setCursor(10, 0);
-      lcd.print("BREW");
+      lcd.print("HEAT");
+
+      lcd.setCursor(0, 0);
+      lcd.print("Set: ");
+      lcd.print(params[SET_BREW]);
+
+      lcd.setCursor(0, 1);
+      lcd.print("Act: ");
+      lcd.print(groupTemp);
     }
-    if (state == STEAM) {
-      lcd.print(params[SET_STEAM]);
+
+    if (state == STATE::STEAM) {
       lcd.setCursor(10, 0);
       lcd.print("STEAM");
-    }
-    // lcd.print(pidOut);
-    
-    lcd.setCursor(0, 1);
-    
-    lcd.print("Act: ");
-    lcd.print(groupTemp);
 
-    if (state == SETUP) {
-    lcd.setCursor(12, 0);
+      lcd.setCursor(0, 0);
+      lcd.print("Set: ");
+      lcd.print(params[SET_STEAM]);
+
+      lcd.setCursor(0, 1);
+      lcd.print("Act: ");
+      lcd.print(boilerTemp);
+    }
+
+    if (state == STATE::SETUP) {
+      lcd.setCursor(10, 0);
+      lcd.print("STEAM");
+
+      lcd.setCursor(0, 0);
       switch (editSetting) {
         case SET_BREW:
           lcd.print(" *S");
@@ -365,7 +390,7 @@ void loop() {
       }
 
       
-      lcd.setCursor(12, 1);
+      lcd.setCursor(0, 1);
       switch (editSetting) {
         case SET_BREW:
           lcd.print(params[SET_BREW], 0);

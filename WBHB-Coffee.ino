@@ -1,7 +1,11 @@
+#define PRINTF_SUPPORT_EXPONENTIAL_SPECIFIERS 0
+#define PRINTF_SUPPORT_LONG_LONG 0
+
 #include <Adafruit_RGBLCDShield.h>
 #include <MAX6675.h>
 #include <PID_v1.h>
 #include <EEPROM.h>
+#include "lib/printf/printf.cpp"
 
 // Constants
 
@@ -25,6 +29,13 @@ enum STATE {
 enum SET {
   AT_BOILER,
   AT_GROUP
+};
+
+enum TEMP_STATE {
+  TEMP_LOW,
+  TEMP_HIGH,
+  UNSTABLE,
+  STABLE
 };
 
 /*const PROGMEM */byte DEGREES_C[8] = {
@@ -78,6 +89,8 @@ double boilerTemp = 0;
 double groupTemp = boilerTemp - params[OFFSET];
 double boilerSetPoint = params[SET_BREW] + params[OFFSET];
 
+TEMP_STATE tempState = TEMP_STATE::TEMP_LOW;
+
 double pidOut = 0;
 int pidWindowSize = 400;
 unsigned long pidWindowStartTime;
@@ -98,6 +111,9 @@ bool buttonLatch = false;
 // hardware interfaces
 
 Adafruit_RGBLCDShield lcd = Adafruit_RGBLCDShield();
+
+char lcdBuffer_top[]    = "                ";
+char lcdBuffer_bottom[] = "                ";
 
 #define CS_PIN 6
 MAX6675 tcouple(CS_PIN);
@@ -153,7 +169,7 @@ void updateTemp() {
     // hadle switched from bang to pid
     if (tempControl.GetMode() == MANUAL) {
       if (boilerTemp < boilerSetPoint + params[BANG_HIGH]
-      && boilerTemp > boilerSetPoint - params[BANG_LOW]) {
+       && boilerTemp > boilerSetPoint - params[BANG_LOW]) {
         pidOut = 0;
         tempControl.SetMode(AUTOMATIC);
       }
@@ -184,30 +200,31 @@ void setup() {
 
   lcd.begin(16, 2);
 
-  lcd.createChar(1, DEGREES_C);
+  lcd.createChar(7, DEGREES_C);
 
-  lcd.print("WBHB Coffee");
-  lcd.setCursor(0, 1);
-  lcd.print("Init v");
+  sprintf_(lcdBuffer_bottom, "   WBHB Coffee  ");
 
   uint8_t version = 0;
 
   EEPROM.get(PARAMS_VER_ADD, version);
 
   if (version == PARAMS_VERSION) {
-    lcd.print(PARAMS_VERSION);
+    sprintf_(lcdBuffer_top, "Init: v%2d       ", PARAMS_VERSION);
     // load stored params from EEPROM
     EEPROM.get(PARAMS_BASE_ADD, params);
   } else {
     // print update
-    lcd.print(version);
-    lcd.print("->");
-    lcd.print(PARAMS_VERSION);
+    sprintf_(lcdBuffer_top, "Init: v%2d->%2d   ", version, PARAMS_VERSION);
     // store version to EEPROM
     EEPROM.put(PARAMS_VER_ADD, PARAMS_VERSION);
     // store default params to EEPROM
     EEPROM.put(PARAMS_BASE_ADD, params);
   }
+
+  lcd.setCursor(0, 0);
+  lcd.print(lcdBuffer_top);
+  lcd.setCursor(0, 1);
+  lcd.print(lcdBuffer_bottom);
 
   delay(500);
   
@@ -221,7 +238,6 @@ void setup() {
 
   lastSerialUpdate = millis();
   lastScreenUpdate = millis();
-
 }
 
 void loop() {
@@ -292,6 +308,18 @@ void loop() {
                 editSetting = KD;
                 break;
               case KD:
+                editSetting = OFFSET;
+                break;
+              case OFFSET:
+                editSetting = BANG_HIGH;
+                break;
+              case BANG_HIGH:
+                editSetting = BANG_LOW;
+                break;
+              case BANG_LOW:
+                editSetting = MAX_TEMP;
+                break;
+              case MAX_TEMP:
                 editSetting = KP;
                 break;
             }
@@ -310,6 +338,18 @@ void loop() {
                 updateParam(KD, 0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
                 break;
+              case OFFSET:
+                updateParam(OFFSET, 0.1);
+                break;
+              case BANG_HIGH:
+                updateParam(BANG_HIGH, 1);
+                break;
+              case BANG_LOW:
+                updateParam(BANG_LOW, -1);
+                break;
+              case MAX_TEMP:
+                updateParam(MAX_TEMP, 1);
+                break;
             }
           }
           if (buttons & BUTTON_DOWN) {
@@ -326,6 +366,18 @@ void loop() {
                 updateParam(KD, -0.1);
                 tempControl.SetTunings(params[KP], params[KI], params[KD]);
                 break;
+              case OFFSET:
+                updateParam(OFFSET, -0.1);
+                break;
+              case BANG_HIGH:
+                updateParam(BANG_HIGH, -1);
+                break;
+              case BANG_LOW:
+                updateParam(BANG_LOW, 1);
+                break;
+              case MAX_TEMP:
+                updateParam(MAX_TEMP, -1);
+                break;
             }
           }
           if (buttons & BUTTON_RIGHT) {
@@ -337,6 +389,24 @@ void loop() {
     if (buttonLatch) {
       buttonLatch = false;
     }
+  }
+
+  if (boilerTemp <= boilerSetPoint + 1
+     && boilerTemp >= boilerSetPoint - 1) {
+    if (stableTime == 0) {
+      stableTime = now;
+    }
+    if (now - stableTime > stableTarget) {
+      tempState = TEMP_STATE::STABLE;
+    } else {
+      tempState = TEMP_STATE::UNSTABLE;
+    }
+  } else if (boilerTemp < boilerSetPoint) {
+    stableTime = 0;
+    tempState = TEMP_STATE::TEMP_LOW;
+  } else {
+    stableTime = 0;
+    tempState = TEMP_STATE::TEMP_HIGH;
   }
 
   if (now - lastSerialUpdate > serialTime) {
@@ -357,94 +427,73 @@ void loop() {
 
   if (now - lastScreenUpdate > frameTime) {
     lastScreenUpdate = now;
-    lcd.clear();
-
     
     if (state == STATE::HEAT) {
-      lcd.setCursor(11, 0);
-      lcd.print("HEAT");
+      sprintf_(lcdBuffer_top, "Heat:       %3.0f%c", params[SET_BREW], 7);
 
-      lcd.setCursor(0, 0);
-      lcd.print("Set: ");
-      lcd.print(params[SET_BREW]);
-      lcd.write(1);
-
-      lcd.setCursor(0, 1);
-      lcd.print("Act: ");
-      lcd.print(groupTemp);
-      lcd.write(1);
+      if (tempState == TEMP_STATE::STABLE) {
+        sprintf_(lcdBuffer_bottom, "     <Brew>     ");
+      } else {
+        sprintf_(lcdBuffer_bottom, "         %6.2f%c", groupTemp, 7);
+      }
     }
 
     if (state == STATE::STEAM) {
-      lcd.setCursor(11, 0);
-      lcd.print("STEAM");
-
-      lcd.setCursor(0, 0);
-      lcd.print("Set: ");
-      lcd.print(params[SET_STEAM]);
-      lcd.write(1);
-
-      lcd.setCursor(0, 1);
-      lcd.print("Act: ");
-      lcd.print(boilerTemp);
-      lcd.write(1);
+      sprintf_(lcdBuffer_top, "Steam:      %3.0f%c", params[SET_STEAM], 7);
+      sprintf_(lcdBuffer_bottom, "         %6.2f%c", boilerTemp, 7);
     }
 
     if (state == STATE::SETUP) {
-      lcd.setCursor(11, 0);
-      lcd.print("SETUP");
-
-      lcd.setCursor(0, 0);
       switch (editSetting) {
-        case SET_BREW:
-          lcd.print(" *S");
-          break;
         case KP:
-          lcd.print(" *P");
+          sprintf_(lcdBuffer_top,    "Setup:        kP");
+          sprintf_(lcdBuffer_bottom, "             %3.0f", params[KP]);
           break;
         case KI:
-          lcd.print(" *I");
+          sprintf_(lcdBuffer_top,    "Setup:        kI");
+          sprintf_(lcdBuffer_bottom, "           %5.1f", params[KI]);
           break;
         case KD:
-          lcd.print(" *D");
+          sprintf_(lcdBuffer_top,    "Setup:        kD");
+          sprintf_(lcdBuffer_bottom, "           %5.1f", params[KD]);
           break;
-      }
-
-      
-      lcd.setCursor(0, 1);
-      switch (editSetting) {
-        case SET_BREW:
-          lcd.print(params[SET_BREW], 0);
+        case OFFSET:
+          sprintf_(lcdBuffer_top,    "Setup: GrpOffset");
+          sprintf_(lcdBuffer_bottom, "            %4.1f", params[OFFSET]);
           break;
-        case KP:
-          lcd.print(params[KP], 1);
+        case BANG_HIGH:
+          sprintf_(lcdBuffer_top,    "Setup: Bang High");
+          sprintf_(lcdBuffer_bottom, "              %2.0f", params[BANG_HIGH]);
           break;
-        case KI:
-          lcd.print(params[KI], 1);
+        case BANG_LOW:
+          sprintf_(lcdBuffer_top,    "Setup:  Bang Low");
+          sprintf_(lcdBuffer_bottom, "             -%2.0f", params[BANG_LOW]);
           break;
-        case KD:
-          lcd.print(params[KD], 1);
+        case MAX_TEMP:
+          sprintf_(lcdBuffer_top,    "Setup:  Max Temp");
+          sprintf_(lcdBuffer_bottom, "             %3.0f", params[MAX_TEMP]);
           break;
       }
     }
 
-    if (groupTemp <= params[SET_BREW] + 1
-     && groupTemp >= params[SET_BREW] - 1) {
-      if (stableTime == 0) {
-        stableTime = now;
-      }
-      if (now - stableTime > stableTarget) {
-        lcd.setBacklight(GREEN);
-      } else {
+    lcd.setCursor(0, 0);
+    lcd.print(lcdBuffer_top);
+    lcd.setCursor(0, 1);
+    lcd.print(lcdBuffer_bottom);
+
+    switch (tempState) {
+      case TEMP_STATE::TEMP_LOW:
+        lcd.setBacklight(BLUE);
+        break;
+      case TEMP_STATE::TEMP_HIGH:
+        lcd.setBacklight(RED);
+        break;
+      case TEMP_STATE::UNSTABLE:
         lcd.setBacklight(VIOLET);
-      }
-      
-    } else if (groupTemp < params[SET_BREW]) {
-      stableTime = 0;
-      lcd.setBacklight(BLUE);
-    } else {
-      stableTime = 0;
-      lcd.setBacklight(RED);
+        break;
+      case TEMP_STATE::STABLE:
+        lcd.setBacklight(GREEN);
+        break;
     }
   }
 }

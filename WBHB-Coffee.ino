@@ -27,9 +27,20 @@ enum SET {
   AT_GROUP
 };
 
+/*const PROGMEM */byte DEGREES_C[8] = {
+  B01000,
+  B10100,
+  B01000,
+  B00011,
+  B00100,
+  B00100,
+  B00011,
+  B00000
+};
+
 // Params
 
-const uint8_t PARAMS_VERSION = 2;
+const PROGMEM uint8_t PARAMS_VERSION = 3;
 #define PARAMS_VER_ADD 0x00
 #define PARAMS_BASE_ADD 0x04
 
@@ -45,18 +56,18 @@ const uint8_t PARAMS_VERSION = 2;
 #define PID_LOW_ADJUST 10
 
 double params[11] = {
-  0, // NOT USED
+  0, // NOT USED (version)
   15, // params[KP] = 15;
   0.5, // params[KI] = 0.5;
   10, // params[KD] = 10;
   95, // params[SET_BREW] = 95;
-  120, // steamSetPoint = 120;
+  130, // steamSetPoint = 120;
   6, // offset = 6;
 
   // Advanced Params
   20, // params[BANG_LOW] force output when more than this far below setpoint;
   10, // params[BANG_HIGH] force output off when more that this far above setpoint;
-  130, // params[BANG_HIGH] maximum boiler temperature
+  140, // params[MAX_TEMP] maximum boiler temperature
   -50 // params[PID_LOW_ADJUST] = -50;
 };
 
@@ -80,7 +91,7 @@ unsigned long lastScreenUpdate;
 unsigned long stableTarget = 20000;
 unsigned long stableTime = 0;
 
-unsigned short editSetting = SET_BREW;
+unsigned short editSetting = KP;
 
 bool buttonLatch = false;
 
@@ -172,6 +183,9 @@ void setup() {
   Serial.begin(9600, SERIAL_8N1);
 
   lcd.begin(16, 2);
+
+  lcd.createChar(1, DEGREES_C);
+
   lcd.print("WBHB Coffee");
   lcd.setCursor(0, 1);
   lcd.print("Init v");
@@ -230,7 +244,7 @@ void loop() {
     if (!buttonLatch) {
       buttonLatch = true;
       switch (state) {
-        case HEAT:
+        case STATE::HEAT:
           if (buttons & BUTTON_SELECT) {
             // state = STATE::BREW;
           }
@@ -252,7 +266,7 @@ void loop() {
             updateSetPoint(params[SET_STEAM], SET::AT_BOILER);
           }
           break;
-        case STEAM:
+        case STATE::STEAM:
           if (buttons & BUTTON_UP) {
             updateParam(SET_STEAM, 1);
             updateSetPoint(params[SET_STEAM], SET::AT_BOILER);
@@ -268,7 +282,7 @@ void loop() {
             updateSetPoint(params[SET_BREW], SET::AT_GROUP);
           }
           break;
-        case SETUP:
+        case STATE::SETUP:
           if (buttons & BUTTON_SELECT) {
             switch (editSetting) {
               case KP:
@@ -314,7 +328,6 @@ void loop() {
                 break;
             }
           }
-          break;
           if (buttons & BUTTON_RIGHT) {
             state = STATE::HEAT;
           }
@@ -330,8 +343,12 @@ void loop() {
     if (Serial) {
       lastSerialUpdate = now;
 
-      Serial.print("temp:");
+      Serial.print("bTemp:");
+      Serial.print(boilerTemp);
+      Serial.print(";gTemp:");
       Serial.print(groupTemp);
+      Serial.print(";setP:");
+      Serial.print(boilerSetPoint);
       Serial.print(";pid:");
       Serial.print(pidOut);
       Serial.print("\n");
@@ -344,34 +361,38 @@ void loop() {
 
     
     if (state == STATE::HEAT) {
-      lcd.setCursor(10, 0);
+      lcd.setCursor(11, 0);
       lcd.print("HEAT");
 
       lcd.setCursor(0, 0);
       lcd.print("Set: ");
       lcd.print(params[SET_BREW]);
+      lcd.write(1);
 
       lcd.setCursor(0, 1);
       lcd.print("Act: ");
       lcd.print(groupTemp);
+      lcd.write(1);
     }
 
     if (state == STATE::STEAM) {
-      lcd.setCursor(10, 0);
+      lcd.setCursor(11, 0);
       lcd.print("STEAM");
 
       lcd.setCursor(0, 0);
       lcd.print("Set: ");
       lcd.print(params[SET_STEAM]);
+      lcd.write(1);
 
       lcd.setCursor(0, 1);
       lcd.print("Act: ");
       lcd.print(boilerTemp);
+      lcd.write(1);
     }
 
     if (state == STATE::SETUP) {
-      lcd.setCursor(10, 0);
-      lcd.print("STEAM");
+      lcd.setCursor(11, 0);
+      lcd.print("SETUP");
 
       lcd.setCursor(0, 0);
       switch (editSetting) {
